@@ -32,7 +32,7 @@ import { createLogger } from '../_shared/logger.ts';
 import { sanitizeErrorMessage } from '../_shared/sanitize.ts';
 import { withRetry } from '../_shared/retry.ts';
 import { type EventSource, fetchRangeEvents } from '../_shared/scan.ts';
-import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
+import { compareGroupState } from '../_shared/state.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
 
 /** Bounded retry policy for transient RPC and database failures. */
@@ -169,6 +169,37 @@ export async function handleRequest(
     });
 
     if (range === null) {
+      const targetLedger = checkpoint?.lastProcessedLedger ?? config.startLedger;
+      if (latestLedger < targetLedger) {
+        logger.warn('Chain tip is behind checkpoint; probable tip regression or lagging RPC provider', {
+          latestLedger,
+          checkpoint: checkpoint?.lastProcessedLedger,
+          startLedger: config.startLedger,
+        });
+        try {
+          await db.recordRunFailure({
+            correlationId,
+            ledgerFrom: targetLedger,
+            ledgerTo: latestLedger,
+            reason: 'tip_regression',
+          });
+        } catch (recordError) {
+          logger.error('Failed to record run failure in database', {
+            reason: recordError instanceof Error ? recordError.message : String(recordError),
+          });
+        }
+        return jsonResponse(
+          {
+            status: 'failed',
+            reason: 'tip_regression',
+            correlationId,
+            checkpoint: checkpoint?.lastProcessedLedger,
+            lag: ledgerLag(checkpoint, latestLedger),
+          },
+          500,
+        );
+      }
+
       logger.info('Nothing to index', { latestLedger });
       // The tip was still observed. Without this write the lag alert's input
       // freezes at the last indexing run and goes stale exactly when the

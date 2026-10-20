@@ -10,7 +10,7 @@
  * advance the checkpoint.
  */
 
-import { assert, assertEquals, assertRejects } from '@std/assert';
+import { assert, assertEquals, assertNotEquals, assertRejects } from '@std/assert';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { IndexerDb } from '../supabase/functions/_shared/db.ts';
 import {
@@ -68,6 +68,10 @@ class StubSupabaseClient {
 
   from(table: string): StubBuilder {
     return new StubBuilder(this, table);
+  }
+
+  rpc(_name: string, _args?: unknown): Promise<{ data: unknown[]; error: null }> {
+    return Promise.resolve({ data: [], error: null });
   }
 
   rows(table: string): Row[] {
@@ -553,12 +557,71 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
+    // Nothing but the checkpoint read and latest-ledger record happened: no events, no data writes.
     assertEquals(
-      stub.calls.filter((call) => call.op !== 'select'),
+      stub.calls.filter(
+        (call) =>
+          call.op !== 'select' &&
+          !(call.op === 'update' && call.table === 'indexer_checkpoints'),
+      ),
       [],
     );
     assertEquals(rpc.requests, []);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('handleRequest detects tip regression below checkpoint and produces non-skipped failure', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    // Chain head reported is behind the checkpoint (SCENARIO_FROM - 10 < SCENARIO_HEAD)
+    const REGRESSED_HEAD = SCENARIO_FROM - 10;
+    const { stub, db, rpc } = makeDeps([], REGRESSED_HEAD);
+    await db.advanceCheckpoint({ lastProcessedLedger: SCENARIO_HEAD, startLedger: SCENARIO_FROM });
+    stub.calls.length = 0;
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    // Returns non-skipped signal (HTTP 500)
+    assertNotEquals(response.status, 200);
+    const body = await response.json();
+    assertNotEquals(body.status, 'skipped');
+    assertEquals(body.status, 'failed');
+    assertEquals(body.reason, 'tip_regression');
+
+    // Verified that a failure row was recorded in indexer_runs with tip_regression
+    const failureRows = stub.rows('indexer_runs').filter((r) => r.status === 'failed');
+    assertEquals(failureRows.length, 1);
+    assertEquals(failureRows[0]?.reason, 'tip_regression');
+
+    // And checkpoints table was NOT updated with the regressed latest ledger
+    const checkpointUpdates = stub.calls.filter(
+      (call) => call.op === 'update' && call.table === 'indexer_checkpoints',
+    );
+    assertEquals(checkpointUpdates.length, 0);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('handleRequest detects tip regression below startLedger on initial run', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    // No checkpoint exists yet; reported tip is below startLedger (SCENARIO_FROM - 10 < SCENARIO_FROM)
+    const REGRESSED_HEAD = SCENARIO_FROM - 10;
+    const { stub, db, rpc } = makeDeps([], REGRESSED_HEAD);
+    stub.calls.length = 0;
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertNotEquals(response.status, 200);
+    const body = await response.json();
+    assertNotEquals(body.status, 'skipped');
+    assertEquals(body.status, 'failed');
+    assertEquals(body.reason, 'tip_regression');
+
+    const failureRows = stub.rows('indexer_runs').filter((r) => r.status === 'failed');
+    assertEquals(failureRows.length, 1);
+    assertEquals(failureRows[0]?.reason, 'tip_regression');
   } finally {
     restoreEnv();
   }
