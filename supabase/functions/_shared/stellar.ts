@@ -89,6 +89,7 @@ export class RpcError extends Error {
   constructor(
     message: string,
     readonly status?: number,
+    readonly code?: number,
   ) {
     super(message);
     this.name = 'RpcError';
@@ -147,7 +148,11 @@ export class SorobanRpcClient {
     const payload = (await response.json()) as JsonRpcResponse<T>;
 
     if (payload.error) {
-      throw new RpcError(`RPC error ${payload.error.code}: ${payload.error.message}`);
+      throw new RpcError(
+        `RPC error ${payload.error.code}: ${payload.error.message}`,
+        undefined,
+        payload.error.code,
+      );
     }
 
     if (payload.result === undefined) {
