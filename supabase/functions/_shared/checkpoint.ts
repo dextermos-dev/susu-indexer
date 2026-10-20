@@ -65,9 +65,7 @@ export function computeLedgerRange(params: {
     }
   }
 
-  const from = lastProcessedLedger === null
-    ? startLedger
-    : Math.max(lastProcessedLedger + 1, startLedger);
+  const from = lastProcessedLedger === null ? startLedger : lastProcessedLedger + 1;
 
   if (from > latestLedger) return null;
 
@@ -102,4 +100,17 @@ export function ledgerLag(
 ): number | undefined {
   if (current === undefined) return undefined;
   return Math.max(0, latestLedger - current.lastProcessedLedger);
+}
+
+/**
+ * Detects whether a configured start ledger is ahead of where the checkpoint
+ * is set to resume, indicating an attempt to advance startLedger without
+ * performing the documented checkpoint rebuild.
+ */
+export function isStartLedgerAheadOfCheckpoint(
+  lastProcessedLedger: number | null,
+  startLedger: number,
+): boolean {
+  if (lastProcessedLedger === null) return false;
+  return startLedger > lastProcessedLedger + 1;
 }

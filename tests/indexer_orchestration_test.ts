@@ -70,6 +70,10 @@ class StubSupabaseClient {
     return new StubBuilder(this, table);
   }
 
+  rpc(_name: string, _args?: unknown): Promise<{ data: unknown[]; error: null }> {
+    return Promise.resolve({ data: [], error: null });
+  }
+
   rows(table: string): Row[] {
     let rows = this.tables.get(table);
     if (!rows) {
@@ -553,12 +557,43 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
+    // Nothing but the checkpoint read and latest-ledger record happened: no events, no data writes.
     assertEquals(
-      stub.calls.filter((call) => call.op !== 'select'),
+      stub.calls.filter(
+        (call) =>
+          call.op !== 'select' &&
+          !(call.op === 'update' && call.table === 'indexer_checkpoints'),
+      ),
       [],
     );
     assertEquals(rpc.requests, []);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('handleRequest with checkpoint ignores raised startLedger and does not skip', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    // Override env with a raised start ledger far ahead of the scenario
+    Deno.env.set('INDEXER_START_LEDGER', String(SCENARIO_HEAD + 5000));
+
+    const { stub, db, rpc } = makeDeps([], SCENARIO_HEAD);
+    // Checkpoint exists right before SCENARIO_FROM
+    await db.advanceCheckpoint({
+      lastProcessedLedger: SCENARIO_FROM - 1,
+      startLedger: SCENARIO_FROM,
+    });
+    stub.calls.length = 0;
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+
+    // Verify it processed the checkpoint range, not jumped to SCENARIO_HEAD + 5000
+    assertEquals(body.ledgerFrom, SCENARIO_FROM);
+    assertEquals(body.ledgerTo, SCENARIO_HEAD);
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
   } finally {
     restoreEnv();
   }

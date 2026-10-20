@@ -21,7 +21,12 @@
  */
 
 import { authorizeInvocation } from '../_shared/auth.ts';
-import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
+import {
+  canAdvanceCheckpoint,
+  computeLedgerRange,
+  isStartLedgerAheadOfCheckpoint,
+  ledgerLag,
+} from '../_shared/checkpoint.ts';
 import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
 import { type IndexedEventRow, IndexerDb, type RejectedEventRow } from '../_shared/db.ts';
 import { decodeChainEvents } from '../_shared/decode.ts';
@@ -32,7 +37,7 @@ import { createLogger } from '../_shared/logger.ts';
 import { sanitizeErrorMessage } from '../_shared/sanitize.ts';
 import { withRetry } from '../_shared/retry.ts';
 import { type EventSource, fetchRangeEvents } from '../_shared/scan.ts';
-import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
+import { compareGroupState } from '../_shared/state.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
 
 /** Bounded retry policy for transient RPC and database failures. */
@@ -160,6 +165,21 @@ export async function handleRequest(
   try {
     const checkpoint = await withRetry(() => db.getCheckpoint(), RETRY);
     const latestLedger = await withRetry(() => rpc.getLatestLedger(), RETRY);
+
+    const configuredStart = checkpoint?.startLedger ?? config.startLedger;
+    if (
+      checkpoint &&
+      isStartLedgerAheadOfCheckpoint(checkpoint.lastProcessedLedger, configuredStart)
+    ) {
+      logger.warn(
+        'Configured startLedger is ahead of checkpoint resume ledger; continuing from checkpoint to prevent silent ledger skipping. Follow documented rebuild procedure in docs/RUNBOOK.md to reset checkpoint.',
+        {
+          startLedger: configuredStart,
+          lastProcessedLedger: checkpoint.lastProcessedLedger,
+          resumeLedger: checkpoint.lastProcessedLedger + 1,
+        },
+      );
+    }
 
     const range = computeLedgerRange({
       lastProcessedLedger: checkpoint?.lastProcessedLedger ?? null,
