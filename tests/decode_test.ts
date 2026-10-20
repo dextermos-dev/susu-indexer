@@ -8,7 +8,11 @@
  */
 
 import { assertEquals, assertNotEquals } from '@std/assert';
-import { decodeChainEvent, decodeChainEvents } from '../supabase/functions/_shared/decode.ts';
+import {
+  CHAIN_EVENT_NAMES,
+  decodeChainEvent,
+  decodeChainEvents,
+} from '../supabase/functions/_shared/decode.ts';
 import type { RpcEvent } from '../supabase/functions/_shared/stellar.ts';
 import {
   allEvents,
@@ -26,7 +30,7 @@ Deno.test('every captured Testnet event decodes', () => {
 
   assertEquals(rejected, []);
   assertEquals(events.length, allEvents.length);
-  assertEquals(events.length, 26);
+  assertEquals(events.length, 29);
 });
 
 Deno.test('the captured events cover both contracts and their full vocabulary', () => {
@@ -37,10 +41,13 @@ Deno.test('the captured events cover both contracts and their full vocabulary', 
     'completed',
     'contribution',
     'fee',
+    'fee_updated',
     'group_created',
     'join',
+    'pause_updated',
     'payout',
     'start',
+    'treasury_updated',
   ]);
 
   const contracts = [...new Set(events.map((event) => event.contractId))].sort();
@@ -59,6 +66,108 @@ Deno.test('group_created carries the creator, group, token and terms', () => {
   assertEquals(event.creator.startsWith('G'), true);
   assertEquals(event.group.startsWith('C'), true);
   assertEquals(event.token.startsWith('C'), true);
+});
+
+Deno.test('fee_updated decodes feeBps and coordinates from the factory', () => {
+  const raw = factoryEvents.find((e) => {
+    const res = decodeChainEvent(e);
+    return res.ok && res.event.name === 'fee_updated';
+  });
+  if (raw === undefined) throw new Error('no fee_updated event in the fixture');
+
+  assertEquals(raw.topic.length, 2);
+  const event = decodeOk(raw);
+  if (event.name !== 'fee_updated') throw new Error('expected fee_updated');
+
+  assertEquals(event.contractId, FACTORY_ID);
+  assertEquals(event.feeBps, 250);
+  assertEquals(event.ledger > 0, true);
+  assertEquals(/^[0-9a-f]{64}$/.test(event.txHash), true);
+  assertEquals(event.eventId, raw.id);
+});
+
+Deno.test('fee_updated rejects malformed payload missing fee_bps', () => {
+  const raw = factoryEvents.find((e) => {
+    const res = decodeChainEvent(e);
+    return res.ok && res.event.name === 'fee_updated';
+  });
+  if (raw === undefined) throw new Error('no fee_updated event in the fixture');
+
+  const malformed: RpcEvent = { ...raw, value: 'AAAAEQAAAAEAAAAA' };
+  const result = decodeChainEvent(malformed);
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(result.reason.includes('fee_updated payload is malformed'), true);
+  }
+});
+
+Deno.test('treasury_updated decodes treasury address and coordinates from the factory', () => {
+  const raw = factoryEvents.find((e) => {
+    const res = decodeChainEvent(e);
+    return res.ok && res.event.name === 'treasury_updated';
+  });
+  if (raw === undefined) throw new Error('no treasury_updated event in the fixture');
+
+  assertEquals(raw.topic.length, 3);
+  const event = decodeOk(raw);
+  if (event.name !== 'treasury_updated') throw new Error('expected treasury_updated');
+
+  assertEquals(event.contractId, FACTORY_ID);
+  assertEquals(event.treasury, 'GBPJ3JJLZ7XPV6CGF3ABPSTXAATKRBCU2L6P66LHCGLYPBVMJX5BEFH6');
+  assertEquals(event.ledger > 0, true);
+  assertEquals(/^[0-9a-f]{64}$/.test(event.txHash), true);
+  assertEquals(event.eventId, raw.id);
+});
+
+Deno.test('treasury_updated rejects malformed treasury address topic', () => {
+  const raw = factoryEvents.find((e) => {
+    const res = decodeChainEvent(e);
+    return res.ok && res.event.name === 'treasury_updated';
+  });
+  if (raw === undefined) throw new Error('no treasury_updated event in the fixture');
+
+  const malformed: RpcEvent = {
+    ...raw,
+    topic: [raw.topic[0] as string, raw.topic[1] as string, symbolTopic('not_an_address')],
+  };
+  const result = decodeChainEvent(malformed);
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(result.reason.includes('treasury_updated payload is malformed'), true);
+  }
+});
+
+Deno.test('pause_updated decodes paused boolean and coordinates from the factory', () => {
+  const raw = factoryEvents.find((e) => {
+    const res = decodeChainEvent(e);
+    return res.ok && res.event.name === 'pause_updated';
+  });
+  if (raw === undefined) throw new Error('no pause_updated event in the fixture');
+
+  assertEquals(raw.topic.length, 2);
+  const event = decodeOk(raw);
+  if (event.name !== 'pause_updated') throw new Error('expected pause_updated');
+
+  assertEquals(event.contractId, FACTORY_ID);
+  assertEquals(event.paused, true);
+  assertEquals(event.ledger > 0, true);
+  assertEquals(/^[0-9a-f]{64}$/.test(event.txHash), true);
+  assertEquals(event.eventId, raw.id);
+});
+
+Deno.test('pause_updated rejects malformed payload missing paused', () => {
+  const raw = factoryEvents.find((e) => {
+    const res = decodeChainEvent(e);
+    return res.ok && res.event.name === 'pause_updated';
+  });
+  if (raw === undefined) throw new Error('no pause_updated event in the fixture');
+
+  const malformed: RpcEvent = { ...raw, value: 'AAAAEQAAAAEAAAAA' };
+  const result = decodeChainEvent(malformed);
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(result.reason.includes('pause_updated payload is malformed'), true);
+  }
 });
 
 Deno.test('a contribution decodes its member, round and amount', () => {
@@ -161,6 +270,60 @@ Deno.test('a topic count that does not match the event is rejected', () => {
   const result = decodeChainEvent(missingTopic);
   assertEquals(result.ok, false);
   if (!result.ok) assertEquals(result.reason.includes('expects 3 topics'), true);
+});
+
+Deno.test('wrong topic counts fail for all 10 event types', () => {
+  for (const name of CHAIN_EVENT_NAMES) {
+    const raw = allEvents.find((e) => {
+      const res = decodeChainEvent(e);
+      return res.ok && res.event.name === name;
+    });
+    if (raw === undefined) throw new Error(`no event for ${name} in fixture`);
+
+    // Too many topics (add an extra topic)
+    const tooMany: RpcEvent = { ...raw, topic: [...raw.topic, symbolTopic('extra')] };
+    const resTooMany = decodeChainEvent(tooMany);
+    assertEquals(resTooMany.ok, false, `expected failure for too many topics in ${name}`);
+    if (!resTooMany.ok) {
+      assertEquals(
+        resTooMany.reason.includes(
+          `expects ${raw.topic.length} topics, got ${raw.topic.length + 1}`,
+        ),
+        true,
+      );
+    }
+
+    // Too few topics
+    if (raw.topic.length > 2) {
+      const tooFew: RpcEvent = {
+        ...raw,
+        topic: raw.topic.slice(0, raw.topic.length - 1),
+      };
+      const resTooFew = decodeChainEvent(tooFew);
+      assertEquals(resTooFew.ok, false, `expected failure for too few topics in ${name}`);
+      if (!resTooFew.ok) {
+        assertEquals(
+          resTooFew.reason.includes(
+            `expects ${raw.topic.length} topics, got ${raw.topic.length - 1}`,
+          ),
+          true,
+        );
+      }
+    } else {
+      const tooFew: RpcEvent = {
+        ...raw,
+        topic: [raw.topic[0] as string],
+      };
+      const resTooFew = decodeChainEvent(tooFew);
+      assertEquals(resTooFew.ok, false, `expected failure for too few topics in ${name}`);
+      if (!resTooFew.ok) {
+        assertEquals(
+          resTooFew.reason.includes('expected at least 2 topics'),
+          true,
+        );
+      }
+    }
+  }
 });
 
 Deno.test('undecodable XDR in a topic is rejected rather than skipped', () => {
