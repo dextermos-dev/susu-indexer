@@ -24,6 +24,14 @@ function validEnv(overrides: Record<string, string | undefined> = {}): Record<st
     }
   }
 
+  if (overrides['STELLAR_NETWORK'] && overrides['STELLAR_NETWORK_PASSPHRASE'] === undefined) {
+    if (overrides['STELLAR_NETWORK'] === 'mainnet') {
+      env['STELLAR_NETWORK_PASSPHRASE'] = 'Public Global Stellar Network ; September 2015';
+    } else if (overrides['STELLAR_NETWORK'] === 'local') {
+      env['STELLAR_NETWORK_PASSPHRASE'] = 'Standalone Network ; February 2017';
+    }
+  }
+
   return env;
 }
 
@@ -130,4 +138,48 @@ Deno.test('does not echo secret values in the result', () => {
     assertEquals(JSON.stringify(result.invalid).includes(secret), false);
     assertEquals(JSON.stringify(result.missing).includes(secret), false);
   }
+});
+
+Deno.test('rejects mismatched STELLAR_NETWORK and STELLAR_NETWORK_PASSPHRASE', () => {
+  const result = loadConfig(
+    validEnv({
+      STELLAR_NETWORK: 'testnet',
+      STELLAR_NETWORK_PASSPHRASE: 'Public Global Stellar Network ; September 2015',
+    }),
+  );
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(
+      result.invalid.some((item) => item.includes('STELLAR_NETWORK_PASSPHRASE mismatch')),
+      true,
+    );
+  }
+});
+
+Deno.test('accepts valid network and matching passphrase pairs', () => {
+  const testnetResult = loadConfig(
+    validEnv({
+      STELLAR_NETWORK: 'testnet',
+      STELLAR_NETWORK_PASSPHRASE: 'Test SDF Network ; September 2015',
+    }),
+  );
+  assertEquals(testnetResult.ok, true);
+
+  const mainnetResult = loadConfig(
+    validEnv({
+      STELLAR_NETWORK: 'mainnet',
+      STELLAR_NETWORK_PASSPHRASE: 'Public Global Stellar Network ; September 2015',
+      ALLOW_MAINNET: 'true',
+    }),
+  );
+  assertEquals(mainnetResult.ok, true);
+
+  const localResult = loadConfig(
+    validEnv({
+      STELLAR_NETWORK: 'local',
+      STELLAR_NETWORK_PASSPHRASE: 'Standalone Network ; February 2017',
+      STELLAR_RPC_URL: 'http://localhost:8000',
+    }),
+  );
+  assertEquals(localResult.ok, true);
 });

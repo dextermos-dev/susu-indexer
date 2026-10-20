@@ -136,7 +136,7 @@ trap 'rm -f "$secrets_file"' EXIT
   printf 'INDEXER_START_LEDGER=%s\n' "$INDEXER_START_LEDGER"
   printf 'STELLAR_RPC_URL=%s\n' "${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}"
   printf 'STELLAR_NETWORK=%s\n' "${STELLAR_NETWORK:-testnet}"
-  printf 'STELLAR_NETWORK_PASSPHRASE="%s"\n' \
+  printf 'STELLAR_NETWORK_PASSPHRASE=%s\n' \
     "${STELLAR_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}"
   printf 'INDEXER_MAX_LEDGER_RANGE=%s\n' "${INDEXER_MAX_LEDGER_RANGE:-1000}"
   printf 'ALLOW_MAINNET=%s\n' "${ALLOW_MAINNET:-false}"

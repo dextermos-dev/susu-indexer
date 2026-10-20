@@ -41,6 +41,12 @@ export type ConfigResult =
 
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
 
+export const STELLAR_NETWORK_PASSPHRASES: Record<IndexerConfig['network'], string> = {
+  testnet: 'Test SDF Network ; September 2015',
+  mainnet: 'Public Global Stellar Network ; September 2015',
+  local: 'Standalone Network ; February 2017',
+};
+
 function readString(env: Record<string, string | undefined>, key: string): string | undefined {
   const value = env[key];
   if (value === undefined) return undefined;
@@ -129,6 +135,14 @@ export function loadConfig(
   }
   if (network === 'mainnet' && !allowMainnet) {
     invalid.push('STELLAR_NETWORK=mainnet requires ALLOW_MAINNET=true (explicit approval)');
+  }
+
+  const passphrase = values['STELLAR_NETWORK_PASSPHRASE'] as string;
+  const expectedPassphrase = STELLAR_NETWORK_PASSPHRASES[network];
+  if (expectedPassphrase && passphrase !== expectedPassphrase) {
+    invalid.push(
+      `STELLAR_NETWORK_PASSPHRASE mismatch for network '${network}' (expected '${expectedPassphrase}', got '${passphrase}')`,
+    );
   }
 
   const maxLedgers = readPositiveInt(env, 'INDEXER_MAX_LEDGER_RANGE', 1000);
