@@ -416,47 +416,48 @@ export class IndexerDb {
   }
 
   /**
-   * Writes derived state over the stored figures.
+   * Writes derived state over the stored figures in a single bulk operation.
    *
-   * An UPDATE, not an upsert, and the distinction is not stylistic. Postgres
-   * checks a row's `NOT NULL` constraints on the tuple an `INSERT` proposes,
-   * *before* it resolves an `ON CONFLICT` against an existing row. `groups`
-   * carries the group's identity — factory, id, creator, token, terms — as
-   * `NOT NULL` columns with no defaults, and this method knows none of them,
-   * having only derived figures to write. So an upsert here fails on the first
-   * row with `null value in column "factory_contract_id"` even though the
-   * conflicting row exists and holds every one of those values.
+   * An UPDATE, not an upsert, because Postgres evaluates `NOT NULL` constraints
+   * on the proposed tuple before `ON CONFLICT` resolution, and `groups` carries
+   * immutable identity columns (`factory_contract_id`, etc.) that reconciliation
+   * neither knows nor touches.
    *
-   * That failure only appears against a real Postgres; a stubbed client accepts
-   * whatever it is handed.
-   *
-   * Updating is also the honest description of what reconciliation does. It
-   * corrects state on a group that discovery has already recorded; it never
-   * introduces a group, and if asked to, something is wrong enough to say so
-   * rather than create a half-populated row.
+   * Updates all groups in a single round trip via the `bulk_update_group_state`
+   * database function. Reconciling a group with no corresponding `groups` row
+   * fails loudly, matching the zero-rows-updated check.
    */
   async upsertGroupState(states: readonly GroupState[]): Promise<void> {
     if (states.length === 0) return;
     const updatedAt = new Date().toISOString();
 
+    const { data, error } = await this.#client.rpc('bulk_update_group_state', {
+      p_states: states.map((s) => ({
+        contract_id: s.contract_id,
+        status: s.status,
+        member_count: s.member_count,
+        current_round: s.current_round,
+        completed_rounds: s.completed_rounds,
+        contributed_total: s.contributed_total,
+        paid_out_total: s.paid_out_total,
+        fee_total: s.fee_total,
+        last_event_ledger: s.last_event_ledger,
+        updated_at: updatedAt,
+      })),
+    });
+
+    if (error) {
+      throw new Error(`Failed to record group state: ${error.message}`);
+    }
+
+    const updatedIds = new Set(
+      ((data ?? []) as Array<Record<string, unknown>>).map((r) => String(r['contract_id'])),
+    );
+
     for (const state of states) {
-      const { contract_id: contractId, ...figures } = state;
-
-      const { error, count } = await this.#client
-        .from('groups')
-        .update({ ...figures, updated_at: updatedAt }, { count: 'exact' })
-        .eq('contract_id', contractId);
-
-      if (error) {
-        throw new Error(`Failed to record group state: ${error.message}`);
-      }
-
-      // Zero rows means reconciliation was asked about a group that has no row,
-      // so discovery and ingest disagree. Creating one here would write a group
-      // with no identity, which is worse than failing the run.
-      if (count === 0) {
+      if (!updatedIds.has(state.contract_id)) {
         throw new Error(
-          `Failed to record group state: no groups row for ${contractId}. ` +
+          `Failed to record group state: no groups row for ${state.contract_id}. ` +
             'Reconciliation updates existing groups; it never creates them.',
         );
       }
