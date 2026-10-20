@@ -463,11 +463,29 @@ export class IndexerDb {
     }
   }
 
+  /**
+   * Deterministic ordering columns per table before pagination.
+   *
+   * PostgREST/Postgres without an explicit ORDER BY clause does not guarantee
+   * stable row order across OFFSET/LIMIT pages (especially under concurrent writes
+   * or when reading large datasets). Without deterministic ordering, rows can be
+   * skipped or double-counted between consecutive .range() pages.
+   */
+  static readonly #TABLE_ORDER_BY: Record<string, readonly string[]> = {
+    group_members: ['contract_id', 'position'],
+    contributions: ['contract_id', 'round', 'event_identity'],
+    payouts: ['contract_id', 'round', 'event_identity'],
+    protocol_fees: ['contract_id', 'round', 'event_identity'],
+    decoded_events: ['contract_id', 'ledger', 'event_identity'],
+    groups: ['contract_id'],
+  };
+
   async #selectIn(
     table: string,
     columns: string,
     contractIds: readonly string[],
     pageSize = 1000,
+    orderBy?: readonly string[],
   ): Promise<Record<string, unknown>[]> {
     if (contractIds.length === 0) return [];
     if (pageSize <= 0) {
@@ -476,6 +494,7 @@ export class IndexerDb {
 
     const CONTRACT_CHUNK_SIZE = 100;
     const allRows: Record<string, unknown>[] = [];
+    const sortColumns = orderBy ?? IndexerDb.#TABLE_ORDER_BY[table] ?? ['contract_id'];
 
     for (let c = 0; c < contractIds.length; c += CONTRACT_CHUNK_SIZE) {
       const chunk = contractIds.slice(c, c + CONTRACT_CHUNK_SIZE);
@@ -483,10 +502,20 @@ export class IndexerDb {
 
       while (true) {
         const to = from + pageSize - 1;
-        const selectQuery = this.#client
+        let selectQuery = this.#client
           .from(table)
           .select(columns)
           .in('contract_id', chunk);
+
+        for (const col of sortColumns) {
+          if (typeof (selectQuery as { order?: unknown }).order === 'function') {
+            selectQuery = (
+              selectQuery as {
+                order: (col: string, opts?: { ascending: boolean }) => typeof selectQuery;
+              }
+            ).order(col, { ascending: true });
+          }
+        }
 
         const pagedQuery = typeof (selectQuery as { range?: unknown }).range === 'function'
           ? (selectQuery as { range: (from: number, to: number) => typeof selectQuery }).range(

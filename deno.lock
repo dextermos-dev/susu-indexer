@@ -4,6 +4,7 @@
     "jsr:@std/assert@1": "1.0.19",
     "jsr:@std/internal@^1.0.12": "1.0.14",
     "npm:@electric-sql/pglite@*": "0.5.8",
+    "npm:@electric-sql/pglite@0.3.4": "0.3.4",
     "npm:@electric-sql/pglite@0.5.8": "0.5.8",
     "npm:@stellar/stellar-sdk@17.0.1": "17.0.1",
     "npm:@supabase/supabase-js@2.116.0": "2.116.0"
@@ -20,6 +21,9 @@
     }
   },
   "npm": {
+    "@electric-sql/pglite@0.3.4": {
+      "integrity": "sha512-h5hoL2GuxcWN8Q3+jtesIRem14iIvAZVEsTeUF6eO9RiUb6ar73QVIEW9t+Ud58iXAcAE2dFMtWqw3W2Oo4LDw=="
+    },
     "@electric-sql/pglite@0.5.8": {
       "integrity": "sha512-n9tsbUOhwx2epK1V0ZG9Ar4SHWUju04dhmzZXiSBXwBoleOvIfals33NAaWgagQVAL4Rbvx/Ptsu3P+pA09f6Q=="
     },
