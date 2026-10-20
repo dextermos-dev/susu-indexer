@@ -63,11 +63,17 @@ class StubSupabaseClient {
   readonly calls: StubCall[] = [];
   /** When set, this operation throws instead of executing. */
   failOn: StubCall | null = null;
+  /** When set, this operation fails transiently for `count` calls then succeeds. */
+  transientFailures: { table: string; op: StubCall['op']; count: number } | null = null;
   /** When set, this operation returns `{ error }` instead of executing. */
   errorOn: StubCall | null = null;
 
   from(table: string): StubBuilder {
     return new StubBuilder(this, table);
+  }
+
+  rpc(_name: string, _args?: unknown): Promise<{ data: unknown[]; error: null }> {
+    return Promise.resolve({ data: [], error: null });
   }
 
   rows(table: string): Row[] {
@@ -195,6 +201,17 @@ class StubBuilder {
     if (failOn !== null && failOn.table === this.#table && failOn.op === mode) {
       return Promise.reject(new Error(`stubbed failure: ${mode} on ${this.#table}`));
     }
+    const transient = this.#client.transientFailures;
+    if (
+      transient !== null &&
+      transient.table === this.#table &&
+      transient.op === mode &&
+      transient.count > 0
+    ) {
+      transient.count--;
+      this.#client.calls.push({ table: this.#table, op: mode });
+      return Promise.reject(new Error(`transient failure: ${mode} on ${this.#table}`));
+    }
     const errorOn = this.#client.errorOn;
     if (errorOn !== null && errorOn.table === this.#table && errorOn.op === mode) {
       this.#client.calls.push({ table: this.#table, op: mode });
@@ -249,6 +266,7 @@ class StubBuilder {
  */
 class ScriptedRpc implements RpcSource {
   readonly requests: Array<EventPageStart & { contractIds: string[] }> = [];
+  transientFailuresRemaining = 0;
 
   constructor(
     private readonly events: readonly RpcEvent[],
@@ -264,6 +282,10 @@ class ScriptedRpc implements RpcSource {
   ): Promise<GetEventsResult> {
     const { limit: _limit, ...recorded } = params;
     this.requests.push(recorded);
+    if (this.transientFailuresRemaining > 0) {
+      this.transientFailuresRemaining--;
+      return Promise.reject(new Error('transient RPC getEvents failure'));
+    }
     if (params.kind === 'range') {
       const ids = new Set(params.contractIds);
       const events = this.events.filter((event) =>
@@ -553,9 +575,13 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
+    // Nothing but the checkpoint read and latest-ledger record happened: no events, no data writes.
     assertEquals(
-      stub.calls.filter((call) => call.op !== 'select'),
+      stub.calls.filter(
+        (call) =>
+          call.op !== 'select' &&
+          !(call.op === 'update' && call.table === 'indexer_checkpoints'),
+      ),
       [],
     );
     assertEquals(rpc.requests, []);
@@ -651,6 +677,121 @@ Deno.test('handleRequest returns structured 500 even when recordRunFailure inser
     const body = await response.json();
     assertEquals(body.status, 'failed');
     assertEquals(body.reason, 'RPC endpoint unavailable');
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a transient getEvents failure followed by success yields status: "ok" and no failure row', async () => {
+  const restoreEnv = withTestEnv();
+  const delays: number[] = [];
+  const sleep = (ms: number) => {
+    delays.push(ms);
+    return Promise.resolve();
+  };
+
+  try {
+    const { stub, db, rpc } = makeDeps([factoryEvent(5), ...groupEvents], SCENARIO_HEAD);
+    // Inject transient failure into RPC getEvents
+    rpc.transientFailuresRemaining = 2;
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc, sleep });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+
+    assertEquals(body.status, 'ok');
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+    assertEquals(body.eventsIndexed, 21);
+
+    // Assert that sleep was invoked for exponential backoff without real delay
+    assert(delays.length >= 2, 'Must have exercised retry backoff');
+
+    // Checkpoint advanced
+    const checkpoints = stub.rows('indexer_checkpoints');
+    assertEquals(checkpoints[0]?.last_processed_ledger, SCENARIO_HEAD);
+
+    // No failure row recorded
+    const failureRows = stub.rows('indexer_runs').filter((r) => r.status === 'failed');
+    assertEquals(failureRows.length, 0);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a transient DB upsert failure followed by success behaves the same', async () => {
+  const restoreEnv = withTestEnv();
+  const delays: number[] = [];
+  const sleep = (ms: number) => {
+    delays.push(ms);
+    return Promise.resolve();
+  };
+
+  try {
+    const { stub, db, rpc } = makeDeps([factoryEvent(5), ...groupEvents], SCENARIO_HEAD);
+    // Inject transient failure into DB upsert on indexed_events
+    stub.transientFailures = { table: 'indexed_events', op: 'upsert', count: 1 };
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc, sleep });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+
+    assertEquals(body.status, 'ok');
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+    assertEquals(body.eventsIndexed, 21);
+
+    // Assert that sleep was invoked for retry
+    assert(delays.length >= 1, 'Must have exercised retry backoff');
+
+    // Checkpoint advanced
+    const checkpoints = stub.rows('indexer_checkpoints');
+    assertEquals(checkpoints[0]?.last_processed_ledger, SCENARIO_HEAD);
+
+    // No failure row recorded
+    const failureRows = stub.rows('indexer_runs').filter((r) => r.status === 'failed');
+    assertEquals(failureRows.length, 0);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a permanently failing dependency leaves the checkpoint untouched and records exactly one failure', async () => {
+  const restoreEnv = withTestEnv();
+  const delays: number[] = [];
+  const sleep = (ms: number) => {
+    delays.push(ms);
+    return Promise.resolve();
+  };
+
+  try {
+    const { stub, db, rpc } = makeDeps([factoryEvent(5), ...groupEvents], SCENARIO_HEAD);
+    // Advance checkpoint initially to SCENARIO_FROM - 1
+    await db.advanceCheckpoint({
+      lastProcessedLedger: SCENARIO_FROM - 1,
+      startLedger: SCENARIO_FROM - 1,
+    });
+    stub.calls.length = 0;
+
+    // Permanent failure on upsert
+    stub.failOn = { table: 'indexed_events', op: 'upsert' };
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc, sleep });
+    assertEquals(response.status, 500);
+    const body = await response.json();
+
+    assertEquals(body.status, 'failed');
+
+    // 4 attempts means 3 backoff delays occurred
+    assertEquals(delays.length, 3);
+
+    // Checkpoint remained untouched at initial value
+    const checkpoints = stub.rows('indexer_checkpoints');
+    assertEquals(checkpoints[0]?.last_processed_ledger, SCENARIO_FROM - 1);
+
+    // Exactly one failure row recorded
+    const failureRows = stub.rows('indexer_runs').filter((r) => r.status === 'failed');
+    assertEquals(failureRows.length, 1);
+    assertEquals(failureRows[0]?.status, 'failed');
+    assertEquals(failureRows[0]?.ledger_from, SCENARIO_FROM);
   } finally {
     restoreEnv();
   }

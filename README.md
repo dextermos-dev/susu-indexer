@@ -48,8 +48,9 @@ five-contracts-per-filter limit, a reconciliation upsert that Postgres rejects b
 the conflict, and an age-out window that makes a stale checkpoint unrecoverable. All three are
 fixed, and all three are the kind of bug that only appears against a real RPC.
 
-The retry path has been exercised by hand rather than by an automated failure-injection test. That
-is a known gap, not a claim.
+The retry path is covered by automated endpoint-level failure-injection tests
+(`tests/indexer_orchestration_test.ts`), verifying transient and permanent recovery for both RPC and
+database failures.
 
 Two gates stand between this and Mainnet. The machinery for both is written; neither is satisfied:
 
