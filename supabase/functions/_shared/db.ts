@@ -44,6 +44,9 @@ export type IndexedEventRow = {
   value: string;
 };
 
+/** Default batch size for PostgREST upserts to avoid payload and statement limits. */
+export const DEFAULT_WRITE_BATCH_SIZE = 500;
+
 /**
  * A raw event the decoder rejected, as it is persisted.
  *
@@ -101,25 +104,31 @@ export class IndexerDb {
   }
 
   /**
-   * Idempotently upserts indexed events.
+   * Idempotently upserts indexed events in bounded batches.
    *
    * Conflicting on `event_identity` means a replay or an overlapping range, so
    * the existing row is left as-is rather than overwritten.
    */
-  async upsertEvents(rows: readonly IndexedEventRow[]): Promise<void> {
+  async upsertEvents(
+    rows: readonly IndexedEventRow[],
+    batchSize = DEFAULT_WRITE_BATCH_SIZE,
+  ): Promise<void> {
     if (rows.length === 0) return;
 
-    const { error } = await this.#client
-      .from('indexed_events')
-      .upsert([...rows], { onConflict: 'event_identity', ignoreDuplicates: true });
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const batch = rows.slice(i, i + batchSize);
+      const { error } = await this.#client
+        .from('indexed_events')
+        .upsert([...batch], { onConflict: 'event_identity', ignoreDuplicates: true });
 
-    if (error) {
-      throw new Error(`Failed to upsert indexed events: ${error.message}`);
+      if (error) {
+        throw new Error(`Failed to upsert indexed events: ${error.message}`);
+      }
     }
   }
 
   /**
-   * Persists events the decoder could not recognise, one row per event identity.
+   * Persists events the decoder could not recognise in bounded batches, one row per event identity.
    *
    * Conflicting on `event_id` means the same range was re-read, so the existing
    * row is kept. Unlike `recordRunFailure`, this throws on failure: a rejection
@@ -130,23 +139,27 @@ export class IndexerDb {
   async recordRejectedEvents(
     correlationId: string,
     rows: readonly RejectedEventRow[],
+    batchSize = DEFAULT_WRITE_BATCH_SIZE,
   ): Promise<void> {
     if (rows.length === 0) return;
 
-    const { error } = await this.#client
-      .from('indexer_rejected_events')
-      .upsert(
-        // Truncated: reasons are short by construction, but never unbounded.
-        rows.map((row) => ({
-          ...row,
-          reason: row.reason.slice(0, 500),
-          correlation_id: correlationId,
-        })),
-        { onConflict: 'event_id', ignoreDuplicates: true },
-      );
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const batch = rows.slice(i, i + batchSize);
+      const { error } = await this.#client
+        .from('indexer_rejected_events')
+        .upsert(
+          // Truncated: reasons are short by construction, but never unbounded.
+          batch.map((row) => ({
+            ...row,
+            reason: row.reason.slice(0, 500),
+            correlation_id: correlationId,
+          })),
+          { onConflict: 'event_id', ignoreDuplicates: true },
+        );
 
-    if (error) {
-      throw new Error(`Failed to persist rejected events: ${error.message}`);
+      if (error) {
+        throw new Error(`Failed to persist rejected events: ${error.message}`);
+      }
     }
   }
 
@@ -197,26 +210,32 @@ export class IndexerDb {
   }
 
   /**
-   * Records groups the indexer has just discovered.
+   * Records groups the indexer has just discovered in bounded batches.
    *
    * Existing rows are left alone. Discovery supplies identity and nothing else,
    * and the columns it does not set — status, member count, totals — are derived
    * state that belongs to reconciliation, not to discovery.
    */
-  async upsertGroups(rows: readonly NewGroup[]): Promise<void> {
+  async upsertGroups(
+    rows: readonly NewGroup[],
+    batchSize = DEFAULT_WRITE_BATCH_SIZE,
+  ): Promise<void> {
     if (rows.length === 0) return;
 
-    const { error } = await this.#client
-      .from('groups')
-      .upsert([...rows], { onConflict: 'contract_id', ignoreDuplicates: true });
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const batch = rows.slice(i, i + batchSize);
+      const { error } = await this.#client
+        .from('groups')
+        .upsert([...batch], { onConflict: 'contract_id', ignoreDuplicates: true });
 
-    if (error) {
-      throw new Error(`Failed to upsert groups: ${error.message}`);
+      if (error) {
+        throw new Error(`Failed to upsert groups: ${error.message}`);
+      }
     }
   }
 
   /**
-   * Records a run's projected events.
+   * Records a run's projected events in bounded batches.
    *
    * Groups must already be written: every fact table refers to a group row, and
    * in the range that discovers a group, the group and its facts arrive
@@ -226,27 +245,31 @@ export class IndexerDb {
    * and a retried failure therefore all do the same thing, so the index cannot
    * be corrupted by running the same ledger twice.
    */
-  async persistPlan(plan: IngestPlan): Promise<void> {
-    await this.#insertIgnoringDuplicates('decoded_events', plan.decoded, 'event_identity');
-    await this.#insertIgnoringDuplicates('group_members', plan.members, 'contract_id,member');
-    await this.#insertIgnoringDuplicates('contributions', plan.contributions, 'event_identity');
-    await this.#insertIgnoringDuplicates('payouts', plan.payouts, 'event_identity');
-    await this.#insertIgnoringDuplicates('protocol_fees', plan.fees, 'event_identity');
+  async persistPlan(plan: IngestPlan, batchSize = DEFAULT_WRITE_BATCH_SIZE): Promise<void> {
+    await this.#insertIgnoringDuplicates('decoded_events', plan.decoded, 'event_identity', batchSize);
+    await this.#insertIgnoringDuplicates('group_members', plan.members, 'contract_id,member', batchSize);
+    await this.#insertIgnoringDuplicates('contributions', plan.contributions, 'event_identity', batchSize);
+    await this.#insertIgnoringDuplicates('payouts', plan.payouts, 'event_identity', batchSize);
+    await this.#insertIgnoringDuplicates('protocol_fees', plan.fees, 'event_identity', batchSize);
   }
 
   async #insertIgnoringDuplicates(
     table: string,
     rows: readonly object[],
     onConflict: string,
+    batchSize = DEFAULT_WRITE_BATCH_SIZE,
   ): Promise<void> {
     if (rows.length === 0) return;
 
-    const { error } = await this.#client
-      .from(table)
-      .upsert([...rows], { onConflict, ignoreDuplicates: true });
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const batch = rows.slice(i, i + batchSize);
+      const { error } = await this.#client
+        .from(table)
+        .upsert([...batch], { onConflict, ignoreDuplicates: true });
 
-    if (error) {
-      throw new Error(`Failed to record ${table}: ${error.message}`);
+      if (error) {
+        throw new Error(`Failed to record ${table}: ${error.message}`);
+      }
     }
   }
 

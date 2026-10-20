@@ -32,7 +32,7 @@ import { createLogger } from '../_shared/logger.ts';
 import { sanitizeErrorMessage } from '../_shared/sanitize.ts';
 import { withRetry } from '../_shared/retry.ts';
 import { type EventSource, fetchRangeEvents } from '../_shared/scan.ts';
-import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
+import { compareGroupState } from '../_shared/state.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
 
 /** Bounded retry policy for transient RPC and database failures. */
@@ -276,12 +276,15 @@ export async function handleRequest(
 
     // Groups before events: every other fact refers to a group row, and in the
     // range that discovers a group, both arrive together.
-    await withRetry(() => db.upsertGroups(newGroups), RETRY);
-    await withRetry(() => db.upsertEvents(raw.map(toIndexedRow)), RETRY);
-    await withRetry(() => db.recordRejectedEvents(correlationId, rejectedRows), RETRY);
+    await withRetry(() => db.upsertGroups(newGroups, config.writeBatchSize), RETRY);
+    await withRetry(() => db.upsertEvents(raw.map(toIndexedRow), config.writeBatchSize), RETRY);
+    await withRetry(
+      () => db.recordRejectedEvents(correlationId, rejectedRows, config.writeBatchSize),
+      RETRY,
+    );
 
     const plan = planIngest(decoded);
-    await withRetry(() => db.persistPlan(plan), RETRY);
+    await withRetry(() => db.persistPlan(plan, config.writeBatchSize), RETRY);
 
     // Recompute rather than accumulate: a range processed twice corrects the
     // figures instead of inflating them.
